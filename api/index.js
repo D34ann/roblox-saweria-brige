@@ -10,7 +10,7 @@ const recentDonations = [];
 const MAX_STORED_DONATIONS = 100;
 
 // Secret key dari environment variable
-const API_SECRET = process.env.API_SECRET || 'memekbaukaki';
+const API_SECRET = process.env.API_SECRET || 'DefanCukaKoding23';
 
 // Health check
 app.get('/api', (req, res) => {
