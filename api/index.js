@@ -1,69 +1,27 @@
 const express = require('express');
 const cors = require('cors');
-const { createClient } = require('@vercel/postgres');
-
 const app = express();
 
 app.use(express.json());
 app.use(cors());
 
+// Store untuk menyimpan donasi sementara
+const recentDonations = [];
+const MAX_STORED_DONATIONS = 100;
+
 // Secret key dari environment variable
 const API_SECRET = process.env.API_SECRET || 'DefanCukaKoding23';
 
-// Database client
-let db;
-
-// Initialize database connection
-async function initDB() {
-  if (!db) {
-    db = createClient();
-    await db.connect();
-    
-    // Create table if not exists
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS donations (
-        id TEXT PRIMARY KEY,
-        donor_name TEXT NOT NULL,
-        amount INTEGER NOT NULL,
-        message TEXT,
-        username TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        processed BOOLEAN DEFAULT FALSE,
-        processed_at TIMESTAMP
-      )
-    `);
-    
-    // Create index for faster queries
-    await db.query(`
-      CREATE INDEX IF NOT EXISTS idx_processed ON donations(processed);
-      CREATE INDEX IF NOT EXISTS idx_created_at ON donations(created_at DESC);
-    `);
-    
-    console.log('✅ Database initialized');
-  }
-  return db;
-}
-
 // Health check
-app.get('/api', async (req, res) => {
-  try {
-    const db = await initDB();
-    const result = await db.query('SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE processed = false) as pending FROM donations');
-    
-    res.json({ 
-      status: 'Saweria to Roblox Bridge Active',
-      database: 'connected',
-      total_donations: parseInt(result.rows[0].total),
-      pending_donations: parseInt(result.rows[0].pending),
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    console.error('Health check error:', error);
-    res.status(500).json({ error: 'Database connection failed' });
-  }
+app.get('/api', (req, res) => {
+  res.json({ 
+    status: 'Saweria to Roblox Bridge Active',
+    donations_stored: recentDonations.length,
+    timestamp: new Date().toISOString()
+  });
 });
 
-// Webhook endpoint dari Saweria
+// IMPROVED: Webhook endpoint dari Saweria - Extract username dari NAMA
 app.post('/api/webhook/saweria', async (req, res) => {
   try {
     const donation = req.body;
@@ -74,32 +32,34 @@ app.post('/api/webhook/saweria', async (req, res) => {
       return res.status(400).json({ error: 'Invalid donation data' });
     }
 
-    const db = await initDB();
-
-    // Extract username dari NAMA donor
+    // Extract username dari NAMA donor (bukan message)
     const donorName = donation.donator_name || 'Anonim';
     let extractedUsername = null;
-    let cleanDonorName = donorName;
+    let cleanDonorName = donorName; // Nama untuk display
     
-    // Format 1: @username
+    // Format 1: Nama berisi @username (dengan atau tanpa text tambahan)
+    // Contoh: "@Defan", "@Defan donasi nih", "donasi dari @Defan"
     const atMatch = donorName.match(/@([a-zA-Z0-9_]+)/);
     if (atMatch) {
       extractedUsername = atMatch[1];
+      // Bersihkan @ dari nama untuk display
       cleanDonorName = donorName.replace(/@([a-zA-Z0-9_]+)/, atMatch[1]).trim();
     }
     
-    // Format 2: username langsung
+    // Format 2: Nama hanya username (tanpa @)
+    // Contoh: "Defan", "Defan123"
     if (!extractedUsername) {
       const words = donorName.trim().split(/\s+/);
       const firstWord = words[0];
       
+      // Cek apakah kata pertama adalah username valid
       if (/^[a-zA-Z0-9_]{3,20}$/.test(firstWord)) {
         extractedUsername = firstWord;
-        cleanDonorName = donorName;
+        cleanDonorName = donorName; // Pakai nama asli
       }
     }
     
-    // Format 3: Fallback dari message
+    // Format 3: Fallback - coba extract dari message (optional)
     if (!extractedUsername) {
       const message = donation.message || '';
       const msgAtMatch = message.match(/@([a-zA-Z0-9_]+)/);
@@ -108,35 +68,36 @@ app.post('/api/webhook/saweria', async (req, res) => {
       }
     }
 
-    const donationId = Date.now().toString() + Math.random().toString(36).substr(2, 9);
-
-    // Save to database
-    await db.query(
-      `INSERT INTO donations (id, donor_name, amount, message, username, created_at, processed)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [
-        donationId,
-        cleanDonorName,
-        donation.amount_raw,
-        donation.message || '',
-        extractedUsername,
-        donation.created_at || new Date().toISOString(),
-        false
-      ]
-    );
-
-    console.log('✅ Donasi disimpan ke database:', {
-      id: donationId,
-      donor: cleanDonorName,
+    const donationData = {
+      id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
+      donor_name: cleanDonorName,
       amount: donation.amount_raw,
-      username: extractedUsername
+      message: donation.message || '',
+      username: extractedUsername, // Username yang di-extract dari nama
+      created_at: donation.created_at || new Date().toISOString(),
+      processed: false
+    };
+
+    recentDonations.unshift(donationData);
+    
+    if (recentDonations.length > MAX_STORED_DONATIONS) {
+      recentDonations.pop();
+    }
+
+    console.log('✅ Donasi disimpan:', {
+      id: donationData.id,
+      donor: donationData.donor_name,
+      amount: donationData.amount,
+      username: donationData.username,
+      message: donationData.message,
+      original_name: donorName
     });
 
     res.status(200).json({ 
       success: true, 
-      message: 'Donation received and saved',
-      donation_id: donationId,
-      extracted_username: extractedUsername,
+      message: 'Donation received',
+      donation_id: donationData.id,
+      extracted_username: donationData.username,
       clean_name: cleanDonorName
     });
   } catch (error) {
@@ -148,33 +109,25 @@ app.post('/api/webhook/saweria', async (req, res) => {
   }
 });
 
-// Get pending donations (untuk Roblox)
-app.get('/api/donations/pending', async (req, res) => {
+// Endpoint untuk Roblox mengambil donasi pending
+app.get('/api/donations/pending', (req, res) => {
   const apiKey = req.headers['x-api-key'];
   
   if (apiKey !== API_SECRET) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  try {
-    const db = await initDB();
-    const result = await db.query(
-      `SELECT * FROM donations WHERE processed = false ORDER BY created_at ASC LIMIT 50`
-    );
-
-    res.json({
-      success: true,
-      count: result.rows.length,
-      donations: result.rows
-    });
-  } catch (error) {
-    console.error('Error fetching pending:', error);
-    res.status(500).json({ error: 'Database error' });
-  }
+  const pending = recentDonations.filter(d => !d.processed);
+  
+  res.json({
+    success: true,
+    count: pending.length,
+    donations: pending
+  });
 });
 
-// Mark donation as processed
-app.post('/api/donations/:id/processed', async (req, res) => {
+// Mark donasi sebagai processed
+app.post('/api/donations/:id/processed', (req, res) => {
   const apiKey = req.headers['x-api-key'];
   const { id } = req.params;
   
@@ -182,124 +135,68 @@ app.post('/api/donations/:id/processed', async (req, res) => {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  try {
-    const db = await initDB();
-    const result = await db.query(
-      `UPDATE donations SET processed = true, processed_at = $1 WHERE id = $2`,
-      [new Date().toISOString(), id]
-    );
-
-    if (result.rowCount > 0) {
-      res.json({ success: true, message: 'Donation marked as processed' });
-    } else {
-      res.status(404).json({ error: 'Donation not found' });
-    }
-  } catch (error) {
-    console.error('Error marking processed:', error);
-    res.status(500).json({ error: 'Database error' });
+  const donation = recentDonations.find(d => d.id === id);
+  
+  if (donation) {
+    donation.processed = true;
+    res.json({ success: true, message: 'Donation marked as processed' });
+  } else {
+    res.status(404).json({ error: 'Donation not found' });
   }
 });
 
-// Get latest donations (with pagination)
-app.get('/api/donations/latest', async (req, res) => {
+// Get latest donations
+app.get('/api/donations/latest', (req, res) => {
   const apiKey = req.headers['x-api-key'];
-  const limit = parseInt(req.query.limit) || 20;
-  const offset = parseInt(req.query.offset) || 0;
+  const limit = parseInt(req.query.limit) || 10;
   
   if (apiKey !== API_SECRET) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  try {
-    const db = await initDB();
-    const result = await db.query(
-      `SELECT * FROM donations ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
-      [limit, offset]
-    );
-
-    const countResult = await db.query(`SELECT COUNT(*) as total FROM donations`);
-
-    res.json({
-      success: true,
-      donations: result.rows,
-      pagination: {
-        limit,
-        offset,
-        total: parseInt(countResult.rows[0].total)
-      }
-    });
-  } catch (error) {
-    console.error('Error fetching latest:', error);
-    res.status(500).json({ error: 'Database error' });
-  }
+  res.json({
+    success: true,
+    donations: recentDonations.slice(0, limit)
+  });
 });
 
 // Stats endpoint
-app.get('/api/donations/stats', async (req, res) => {
+app.get('/api/donations/stats', (req, res) => {
   const apiKey = req.headers['x-api-key'];
   
   if (apiKey !== API_SECRET) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  try {
-    const db = await initDB();
-    const result = await db.query(`
-      SELECT 
-        COUNT(*) as total_donations,
-        SUM(amount) as total_amount,
-        AVG(amount) as average_amount,
-        COUNT(*) FILTER (WHERE processed = true) as processed_count,
-        COUNT(*) FILTER (WHERE processed = false) as pending_count
-      FROM donations
-    `);
+  const total = recentDonations.reduce((sum, d) => sum + d.amount, 0);
+  const count = recentDonations.length;
 
-    const stats = result.rows[0];
-
-    res.json({
-      success: true,
-      stats: {
-        total_amount: parseInt(stats.total_amount || 0),
-        total_donations: parseInt(stats.total_donations || 0),
-        average: Math.floor(stats.average_amount || 0),
-        processed: parseInt(stats.processed_count || 0),
-        pending: parseInt(stats.pending_count || 0)
-      }
-    });
-  } catch (error) {
-    console.error('Error fetching stats:', error);
-    res.status(500).json({ error: 'Database error' });
-  }
+  res.json({
+    success: true,
+    stats: {
+      total_amount: total,
+      total_donations: count,
+      average: count > 0 ? Math.floor(total / count) : 0
+    }
+  });
 });
 
-// Clear old processed donations (keep last 1000)
-app.post('/api/donations/cleanup', async (req, res) => {
+// Clear donations (admin only)
+app.post('/api/donations/clear', (req, res) => {
   const apiKey = req.headers['x-api-key'];
   
   if (apiKey !== API_SECRET) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  try {
-    const db = await initDB();
-    const result = await db.query(`
-      DELETE FROM donations 
-      WHERE id IN (
-        SELECT id FROM donations 
-        WHERE processed = true 
-        ORDER BY created_at DESC 
-        OFFSET 1000
-      )
-    `);
-
-    res.json({ 
-      success: true, 
-      message: `Cleaned up ${result.rowCount} old donations` 
-    });
-  } catch (error) {
-    console.error('Error cleanup:', error);
-    res.status(500).json({ error: 'Database error' });
-  }
+  const count = recentDonations.length;
+  recentDonations.length = 0;
+  
+  res.json({ 
+    success: true, 
+    message: `Cleared ${count} donations` 
+  });
 });
 
+// Export for Vercel
 module.exports = app;
