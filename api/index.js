@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
-
 const app = express();
+
 app.use(express.json());
 app.use(cors());
 
@@ -21,15 +21,44 @@ app.get('/api', (req, res) => {
   });
 });
 
-// Webhook endpoint dari Saweria
+// IMPROVED: Webhook endpoint dari Saweria
 app.post('/api/webhook/saweria', async (req, res) => {
   try {
     const donation = req.body;
     
     console.log('📥 Donasi diterima:', donation);
-
+    
     if (!donation || !donation.amount_raw) {
       return res.status(400).json({ error: 'Invalid donation data' });
+    }
+
+    // Extract username dari message (support multiple formats)
+    const message = donation.message || '';
+    let extractedUsername = null;
+    
+    // Format 1: @username (di awal atau di mana saja)
+    const atMatch = message.match(/@([a-zA-Z0-9_]+)/);
+    if (atMatch) {
+      extractedUsername = atMatch[1];
+    }
+    
+    // Format 2: username: value atau username = value
+    if (!extractedUsername) {
+      const colonMatch = message.match(/username[:\s=]+([a-zA-Z0-9_]+)/i);
+      if (colonMatch) {
+        extractedUsername = colonMatch[1];
+      }
+    }
+    
+    // Format 3: Jika hanya ada satu kata (anggap sebagai username)
+    if (!extractedUsername) {
+      const words = message.trim().split(/\s+/);
+      if (words.length === 1 && words[0].length > 0) {
+        // Cek apakah kata tersebut valid sebagai username
+        if (/^[a-zA-Z0-9_]+$/.test(words[0])) {
+          extractedUsername = words[0];
+        }
+      }
     }
 
     const donationData = {
@@ -37,6 +66,7 @@ app.post('/api/webhook/saweria', async (req, res) => {
       donor_name: donation.donator_name || 'Anonim',
       amount: donation.amount_raw,
       message: donation.message || '',
+      username: extractedUsername, // Username yang di-extract
       created_at: donation.created_at || new Date().toISOString(),
       processed: false
     };
@@ -47,14 +77,20 @@ app.post('/api/webhook/saweria', async (req, res) => {
       recentDonations.pop();
     }
 
-    console.log('✅ Donasi disimpan:', donationData);
+    console.log('✅ Donasi disimpan:', {
+      id: donationData.id,
+      donor: donationData.donor_name,
+      amount: donationData.amount,
+      username: donationData.username,
+      message: donationData.message
+    });
 
     res.status(200).json({ 
       success: true, 
       message: 'Donation received',
-      donation_id: donationData.id
+      donation_id: donationData.id,
+      extracted_username: donationData.username
     });
-
   } catch (error) {
     console.error('❌ Error:', error);
     res.status(500).json({ 
